@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Project Cost Benchmarker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs, FieldValue, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        window.firebase = {
+            initializeApp,
+            getAuth,
+            signInAnonymously,
+            signInWithCustomToken,
+            onAuthStateChanged,
+            getFirestore,
+            doc,
+            getDoc,
+            addDoc,
+            setDoc,
+            updateDoc,
+            deleteDoc,
+            onSnapshot,
+            collection,
+            query,
+            where,
+            getDocs,
+            FieldValue,
+            serverTimestamp // Export serverTimestamp directly
+        };
+    </script>
+    <!-- Visualization & Content Choices:
+        - Project Info: HTML Form -> Data Entry -> Store in JS object. Goal: Inform. Added Area (SQM) and Unit Rate / SQM inputs, and a calculated total cost display.
+        - Bill of Quantities: HTML Table with Inputs -> Data Entry -> Store in JS array of objects. Goal: Inform/Compare. Chart.js Pie Chart in Summary section to visualize proportions. Goal: Analyze.
+        - Itemized Costs: HTML Form for entry, HTML Table for display -> Data Entry/Organization -> Store in JS array of objects. Auto-calculate 'Amount'. Goal: Organize.
+        - Summary: Display total cost from Bills, Chart.js Pie chart for bill breakdown. Goal: Analyze.
+        - Save/Load Project: Firestore integration for persistence, dropdown for selection. Goal: Organize/Manage.
+        - CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+    <style>
+        .tab-button.active {
+            background-color: #d97706; /* amber-600 */
+            color: white;
+        }
+        .tab-button {
+            background-color: #f5f5f4; /* stone-100 */
+            color: #44403c; /* stone-700 */
+            border-bottom: 2px solid transparent;
+        }
+        .tab-button.active {
+            border-bottom: 2px solid #d97706; /* amber-600 */
+            font-weight: 600;
+        }
+        .chart-container {
+            position: relative;
+            width: 100%;
+            max-width: 600px; /* Max width for readability */
+            margin-left: auto;
+            margin-right: auto;
+            height: 300px; /* Base height */
+            max-height: 400px; /* Max height */
+        }
+        @media (min-width: 768px) { /* md breakpoint */
+            .chart-container {
+                height: 350px;
+            }
+        }
+        /* Ensure table cells don't break words awkwardly */
+        td, th {
+            word-break: keep-all;
+            white-space: nowrap;
+        }
+        input[type="number"]::-webkit-inner-spin-button,
+        input[type="number"]::-webkit-outer-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+        input[type="number"] {
+            -moz-appearance: textfield;
+        }
+        .message-box {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: #4CAF50; /* Green */
+            color: white;
+            padding: 15px 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+            z-index: 1000;
+            display: none; /* Hidden by default */
+        }
+        .message-box.error {
+            background-color: #f44336; /* Red */
+        }
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 999;
+            display: none;
+        }
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-left-color: #d97706;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-stone-100 text-stone-800 font-sans">
+    <div class="container mx-auto p-4 sm:p-6 lg:p-8 max-w-5xl">
+        <header class="mb-6 text-center">
+            <h1 class="text-3xl sm:text-4xl font-bold text-amber-700">Interactive Project Cost Benchmarker</h1>
+            <div id="user-id-display" class="text-sm text-stone-500 mt-2"></div>
+        </header>
+
+        <nav class="mb-6">
+            <ul class="flex flex-wrap border-b border-stone-300">
+                <li class="-mb-px mr-1">
+                    <button id="tab-project-overview" class="tab-button active bg-white inline-block py-2 px-4 text-amber-600 hover:text-amber-700 font-semibold rounded-t-lg" onclick="showTab('project-overview')">Project Overview</button>
+                </li>
+                <li class="mr-1">
+                    <button id="tab-bill-quantities" class="tab-button bg-white inline-block py-2 px-4 text-amber-600 hover:text-amber-700 font-semibold rounded-t-lg" onclick="showTab('bill-quantities')">Bill of Quantities</button>
+                </li>
+                <li class="mr-1">
+                    <button id="tab-itemized-costs" class="tab-button bg-white inline-block py-2 px-4 text-amber-600 hover:text-amber-700 font-semibold rounded-t-lg" onclick="showTab('itemized-costs')">Itemized Costs</button>
+                </li>
+                <li>
+                    <button id="tab-summary" class="tab-button bg-white inline-block py-2 px-4 text-amber-600 hover:text-amber-700 font-semibold rounded-t-lg" onclick="showTab('summary')">Benchmark Summary</button>
+                </li>
+            </ul>
+        </nav>
+
+        <main>
+            <section id="content-project-overview" class="tab-content p-6 bg-white rounded-b-lg shadow-md">
+                <h2 class="text-2xl font-semibold mb-4 text-amber-700">Project Information</h2>
+                <p class="mb-6 text-stone-600">Enter the general details for the project you want to benchmark. This information provides the high-level context for the cost data.</p>
+                <form id="project-info-form" class="space-y-4">
+                    <div>
+                        <label for="projectName" class="block text-sm font-medium text-stone-700">Project Name</label>
+                        <input type="text" id="projectName" name="projectName" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm">
+                    </div>
+                    <div>
+                        <label for="projectAddress" class="block text-sm font-medium text-stone-700">Address</label>
+                        <input type="text" id="projectAddress" name="projectAddress" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm">
+                    </div>
+                    <div>
+                        <label for="projectRegion" class="block text-sm font-medium text-stone-700">Region</label>
+                        <input type="text" id="projectRegion" name="projectRegion" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm">
+                    </div>
+                    <div>
+                        <label for="projectArea" class="block text-sm font-medium text-stone-700">Area (SQM)</label>
+                        <input type="number" id="projectArea" name="projectArea" step="0.01" placeholder="e.g., 1000" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm" oninput="updateCalculatedTotalCost()">
+                    </div>
+                    <div>
+                        <label for="projectUnitRatePerSQM" class="block text-sm font-medium text-stone-700">Unit Rate / SQM (VND)</label>
+                        <input type="number" id="projectUnitRatePerSQM" name="projectUnitRatePerSQM" step="1" placeholder="e.g., 2500000" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm" oninput="updateCalculatedTotalCost()">
+                    </div>
+                    <div>
+                        <label for="projectTotalCost" class="block text-sm font-medium text-stone-700">Stated Total Cost (VND)</label>
+                        <input type="number" id="projectTotalCost" name="projectTotalCost" placeholder="e.g., 2500000000" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm">
+                    </div>
+                    <div class="p-4 bg-stone-50 rounded-lg shadow">
+                        <p class="text-stone-600">Calculated Total Cost (Area x Unit Rate):</p>
+                        <p id="calculatedTotalCost" class="text-2xl font-bold text-teal-700">VND 0</p>
+                    </div>
+                    <div>
+                        <label for="projectStartDate" class="block text-sm font-medium text-stone-700">Start Date</label>
+                        <input type="date" id="projectStartDate" name="projectStartDate" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm">
+                    </div>
+                    <div>
+                        <label for="projectCompletionDate" class="block text-sm font-medium text-stone-700">Completion Date</label>
+                        <input type="date" id="projectCompletionDate" name="projectCompletionDate" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm">
+                    </div>
+                    <div>
+                        <label for="projectContractor" class="block text-sm font-medium text-stone-700">By Contractor</label>
+                        <input type="text" id="projectContractor" name="projectContractor" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm">
+                    </div>
+                    <button type="button" onclick="saveProject()" class="mt-4 px-6 py-2 bg-amber-600 text-white font-semibold rounded-md shadow-sm hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-500">Save Current Project</button>
+                </form>
+
+                <div class="mt-8 p-4 border border-stone-200 rounded-lg bg-stone-50">
+                    <h3 class="text-lg font-medium text-stone-700 mb-3">Load Saved Project</h3>
+                    <div class="flex flex-col sm:flex-row gap-4 items-center">
+                        <select id="savedProjectsSelect" class="flex-grow mt-1 block w-full sm:w-auto px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm">
+                            <option value="">-- Select a Project --</option>
+                        </select>
+                        <button type="button" onclick="loadSelectedProject()" class="px-6 py-2 bg-teal-600 text-white font-semibold rounded-md shadow-sm hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-teal-500">Load Project</button>
+                    </div>
+                </div>
+            </section>
+
+            <section id="content-bill-quantities" class="tab-content hidden p-6 bg-white rounded-b-lg shadow-md">
+                <h2 class="text-2xl font-semibold mb-4 text-amber-700">Bill of Quantities</h2>
+                <p class="mb-6 text-stone-600">Enter the total cost for each bill category. These amounts will be used to generate the cost breakdown summary and chart.</p>
+                <form id="bill-quantities-form" class="space-y-3">
+                    </form>
+                <div class="mt-6 text-right">
+                    <span class="text-lg font-semibold text-stone-700">Total of Bills: VND </span>
+                    <span id="totalBillAmount" class="text-lg font-bold text-amber-700">0</span>
+                </div>
+            </section>
+
+            <section id="content-itemized-costs" class="tab-content hidden p-6 bg-white rounded-b-lg shadow-md">
+                <h2 class="text-2xl font-semibold mb-4 text-amber-700">Itemized Costs</h2>
+                <p class="mb-6 text-stone-600">Add detailed cost items here. Specify the description, brand, unit rate, quantity, and associate it with a bill category. The 'Amount' will be calculated automatically.</p>
+                <form id="itemized-cost-form" class="mb-8 p-4 border border-stone-200 rounded-lg space-y-4">
+                    <h3 class="text-lg font-medium text-stone-700">Add New Item</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label for="itemDescription" class="block text-sm font-medium text-stone-700">Description</label>
+                            <input type="text" id="itemDescription" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm">
+                        </div>
+                        <div>
+                            <label for="itemBrand" class="block text-sm font-medium text-stone-700">Brand</label>
+                            <input type="text" id="itemBrand" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm">
+                        </div>
+                        <div>
+                            <label for="itemCode" class="block text-sm font-medium text-stone-700">Code</label>
+                            <input type="text" id="itemCode" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm">
+                        </div>
+                        <div>
+                            <label for="itemProjectCode" class="block text-sm font-medium text-stone-700">Item Project Code</label>
+                            <input type="text" id="itemProjectCode" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm">
+                        </div>
+                        <div>
+                            <label for="itemUnitRate" class="block text-sm font-medium text-stone-700">Unit Rate (VND)</label>
+                            <input type="number" id="itemUnitRate" step="1" placeholder="0" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm">
+                        </div>
+                        <div>
+                            <label for="itemQuantity" class="block text-sm font-medium text-stone-700">Quantity</label>
+                            <input type="number" id="itemQuantity" step="1" placeholder="0" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm">
+                        </div>
+                        <div>
+                            <label for="itemAmount" class="block text-sm font-medium text-stone-700">Amount (VND)</label>
+                            <input type="text" id="itemAmount" readonly class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm bg-stone-50 sm:text-sm">
+                        </div>
+                        <div>
+                            <label for="itemAssociatedBill" class="block text-sm font-medium text-stone-700">Associated Bill</label>
+                            <select id="itemAssociatedBill" class="mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm">
+                                </select>
+                        </div>
+                    </div>
+                    <button type="button" onclick="addItemizedCost()" class="mt-2 px-4 py-2 bg-amber-600 text-white font-semibold rounded-md shadow-sm hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-500">Add Item</button>
+                </form>
+                <h3 class="text-lg font-medium text-stone-700 mb-3">Added Items</h3>
+                <div class="overflow-x-auto">
+                    <table id="itemized-costs-table" class="min-w-full divide-y divide-stone-200 border border-stone-300">
+                        <thead class="bg-stone-50">
+                            <tr>
+                                <th class="px-4 py-2 text-left text-xs font-medium text-stone-500 uppercase tracking-wider">Description</th>
+                                <th class="px-4 py-2 text-left text-xs font-medium text-stone-500 uppercase tracking-wider">Bill</th>
+                                <th class="px-4 py-2 text-right text-xs font-medium text-stone-500 uppercase tracking-wider">Amount (VND)</th>
+                                <th class="px-4 py-2 text-center text-xs font-medium text-stone-500 uppercase tracking-wider">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-stone-200">
+                            <tr id="no-items-row"><td colspan="4" class="px-4 py-3 text-center text-stone-500">No items added yet.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                 <div class="mt-6 text-right">
+                    <span class="text-lg font-semibold text-stone-700">Total of Itemized Costs: VND </span>
+                    <span id="totalItemizedAmount" class="text-lg font-bold text-amber-700">0</span>
+                </div>
+            </section>
+
+            <section id="content-summary" class="tab-content hidden p-6 bg-white rounded-b-lg shadow-md">
+                <h2 class="text-2xl font-semibold mb-4 text-amber-700">Benchmark Summary</h2>
+                <p class="mb-6 text-stone-600">This section provides a visual summary of the project costs based on the 'Bill of Quantities' entries. Hover over chart segments for more details.</p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
+                    <div>
+                        <h3 class="text-xl font-semibold text-stone-700 mb-2">Cost Breakdown by Bill Category</h3>
+                        <div class="chart-container bg-stone-50 p-2 rounded-lg shadow">
+                            <canvas id="costBreakdownChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="space-y-3">
+                        <h3 class="text-xl font-semibold text-stone-700 mb-2">Key Figures</h3>
+                        <div class="p-4 bg-stone-50 rounded-lg shadow">
+                            <p class="text-stone-600">Total Cost:</p>
+                            <p id="summaryProjectTotalCost" class="text-2xl font-bold text-amber-700">VND 0</p>
+                        </div>
+                        <div class="p-4 bg-stone-50 rounded-lg shadow">
+                            <p class="text-stone-600">Calculated Total from Bills:</p>
+                            <p id="summaryTotalBillAmount" class="text-2xl font-bold text-amber-700">VND 0</p>
+                        </div>
+                        <div class="p-4 bg-stone-50 rounded-lg shadow">
+                            <p class="text-stone-600">Calculated Total from Itemized Costs:</p>
+                            <p id="summaryTotalItemizedAmount" class="text-2xl font-bold text-amber-700">VND 0</p>
+                        </div>
+                         <div class="p-4 bg-stone-50 rounded-lg shadow">
+                            <p class="text-stone-600">Calculated Total Cost (Area x Unit Rate):</p>
+                            <p id="summaryCalculatedTotalCost" class="text-2xl font-bold text-teal-700">VND 0</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="mt-8 text-center text-sm text-stone-500">
+            <p>&copy; <span id="currentYear"></span> Project Cost Benchmarker. For demonstration purposes.</p>
+            <p class="mt-2">Application Link: <a id="appLink" href="#" class="text-teal-600 hover:underline">Click to Copy Link</a></p>
+        </footer>
+    </div>
+
+    <div id="messageBox" class="message-box"></div>
+    <div id="loadingOverlay" class="loading-overlay">
+        <div class="spinner"></div>
+    </div>
+
+    <script>
+        const billCategories = [
+            { id: 1, name: "Preliminary" },
+            { id: 2, name: "Partition & Glazing" },
+            { id: 3, name: "Wall finishing" },
+            { id: 4, name: "Door" },
+            { id: 5, name: "Floor Finishes" },
+            { id: 6, name: "Ceiling Finishes" },
+            { id: 7, name: "Joinery" },
+            { id: 8, name: "Electrical" },
+            { id: 9, name: "Data" },
+            { id: 10, name: "HVAC" },
+            { id: 11, name: "Fire Fighting" }, // Changed from FF to Fire Fighting
+            { id: 12, name: "Loose Furniture" },
+            { id: 13, name: "Branding" }
+        ];
+
+        let projectInfo = {};
+        let billQuantitiesData = billCategories.map(bill => ({ ...bill, amount: 0 }));
+        let itemizedCostsData = [];
+        let savedProjects = []; // To store list of saved projects for dropdown
+
+        let costChart = null;
+
+        // Firebase variables
+        let app;
+        let db;
+        let auth;
+        let userId;
+        let appId;
+
+        function showMessageBox(message, isError = false) {
+            const msgBox = document.getElementById('messageBox');
+            msgBox.textContent = message;
+            msgBox.className = 'message-box'; // Reset classes
+            if (isError) {
+                msgBox.classList.add('error');
+            }
+            msgBox.style.display = 'block';
+            setTimeout(() => {
+                msgBox.style.display = 'none';
+            }, 3000);
+        }
+
+        function showLoading(show) {
+            document.getElementById('loadingOverlay').style.display = show ? 'flex' : 'none';
+        }
+
+        function showTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.add('hidden'));
+            document.getElementById(`content-${tabId}`).classList.remove('hidden');
+
+            document.querySelectorAll('.tab-button').forEach(button => button.classList.remove('active', 'bg-amber-600', 'text-white'));
+            document.querySelectorAll('.tab-button').forEach(button => button.classList.add('bg-white', 'text-amber-600'));
+            
+            const activeButton = document.getElementById(`tab-${tabId}`);
+            activeButton.classList.add('active','bg-amber-600', 'text-white');
+            activeButton.classList.remove('bg-white', 'text-amber-600');
+
+
+            if (tabId === 'summary') {
+                updateSummaryView();
+            }
+        }
+
+        function formatCurrency(amount) {
+            // VND typically does not use decimal places
+            return parseFloat(amount).toLocaleString('vi-VN', { style: 'currency', currency: 'VND', minimumFractionDigits: 0, maximumFractionDigits: 0 });
+        }
+        
+        function wrapChartLabel(str, maxWidth = 16) {
+            if (str.length <= maxWidth) return str;
+            const words = str.split(' ');
+            let currentLine = '';
+            const lines = [];
+            for (const word of words) {
+                if ((currentLine + word).length > maxWidth && currentLine.length > 0) {
+                    lines.push(currentLine.trim());
+                    currentLine = word + ' ';
+                } else {
+                    currentLine += word + ' ';
+                }
+            }
+            lines.push(currentLine.trim());
+            return lines;
+        }
+
+
+        function initializeBillQuantitiesForm() {
+            const form = document.getElementById('bill-quantities-form');
+            form.innerHTML = '';
+            billQuantitiesData.forEach(bill => {
+                const div = document.createElement('div');
+                div.className = 'grid grid-cols-3 gap-2 items-center';
+                
+                const label = document.createElement('label');
+                label.htmlFor = `bill-${bill.id}`;
+                label.textContent = bill.name;
+                label.className = 'col-span-2 text-sm font-medium text-stone-700';
+                div.appendChild(label);
+
+                const input = document.createElement('input');
+                input.type = 'number';
+                input.id = `bill-${bill.id}`;
+                input.name = `bill-${bill.id}`;
+                input.step = "1"; // Changed step to 1 for VND
+                input.placeholder = "0"; // Changed placeholder for VND
+                input.className = 'mt-1 block w-full px-3 py-2 border border-stone-300 rounded-md shadow-sm focus:outline-none focus:ring-amber-500 focus:border-amber-500 sm:text-sm';
+                input.value = bill.amount > 0 ? bill.amount.toFixed(0) : ''; // Changed toFixed(0) for VND
+                input.oninput = (e) => {
+                    bill.amount = parseFloat(e.target.value) || 0;
+                    updateTotalBillAmount();
+                };
+                div.appendChild(input);
+                form.appendChild(div);
+            });
+            updateTotalBillAmount();
+        }
+
+        function updateTotalBillAmount() {
+            const total = billQuantitiesData.reduce((sum, bill) => sum + bill.amount, 0);
+            document.getElementById('totalBillAmount').textContent = total.toFixed(0); // Changed toFixed(0) for VND
+            if (document.getElementById('content-summary').classList.contains('hidden') === false) {
+                 updateSummaryView(); // Update chart if summary is visible
+            }
+        }
+        
+        function initializeItemizedCostForm() {
+            const select = document.getElementById('itemAssociatedBill');
+            select.innerHTML = '';
+            billCategories.forEach(bill => {
+                const option = document.createElement('option');
+                option.value = bill.id;
+                option.textContent = bill.name;
+                select.appendChild(option);
+            });
+
+            document.getElementById('itemUnitRate').oninput = calculateItemAmount;
+            document.getElementById('itemQuantity').oninput = calculateItemAmount;
+        }
+
+        function calculateItemAmount() {
+            const unitRate = parseFloat(document.getElementById('itemUnitRate').value) || 0;
+            const quantity = parseFloat(document.getElementById('itemQuantity').value) || 0;
+            document.getElementById('itemAmount').value = (unitRate * quantity).toFixed(0); // Changed toFixed(0) for VND
+        }
+
+        function addItemizedCost() {
+            const description = document.getElementById('itemDescription').value;
+            const brand = document.getElementById('itemBrand').value;
+            const code = document.getElementById('itemCode').value;
+            const projectCode = document.getElementById('itemProjectCode').value;
+            const unitRate = parseFloat(document.getElementById('itemUnitRate').value) || 0;
+            const quantity = parseFloat(document.getElementById('itemQuantity').value) || 0;
+            const amount = unitRate * quantity;
+            const associatedBillId = parseInt(document.getElementById('itemAssociatedBill').value);
+
+            if (!description || quantity <= 0 || unitRate < 0 ) {
+                showMessageBox("Please fill in Description, ensure Quantity is positive, and Unit Rate is not negative.", true);
+                return;
+            }
+
+            const newItem = {
+                id: Date.now(), // simple unique ID
+                description, brand, code, projectCode, unitRate, quantity, amount, associatedBillId
+            };
+            itemizedCostsData.push(newItem);
+            renderItemizedCostsTable();
+            document.getElementById('itemized-cost-form').reset();
+            document.getElementById('itemAmount').value = ''; // Clear calculated amount
+            updateTotalItemizedAmount();
+        }
+
+        function renderItemizedCostsTable() {
+            const tbody = document.getElementById('itemized-costs-table').getElementsByTagName('tbody')[0];
+            tbody.innerHTML = ''; 
+            
+            const noItemsRow = document.getElementById('no-items-row');
+            if (itemizedCostsData.length === 0) {
+                if(noItemsRow) noItemsRow.style.display = 'table-row';
+            } else {
+                 if(noItemsRow) noItemsRow.style.display = 'none';
+                itemizedCostsData.forEach((item, index) => {
+                    const row = tbody.insertRow();
+                    const billName = billCategories.find(b => b.id === item.associatedBillId)?.name || 'N/A';
+                    
+                    row.insertCell().textContent = item.description;
+                    row.insertCell().textContent = billName;
+                    const amountCell = row.insertCell();
+                    amountCell.textContent = item.amount.toFixed(0); // Changed toFixed(0) for VND
+                    amountCell.className = 'text-right';
+
+                    const actionsCell = row.insertCell();
+                    actionsCell.className = 'text-center';
+                    const deleteButton = document.createElement('button');
+                    deleteButton.textContent = 'Delete';
+                    deleteButton.className = 'px-2 py-1 bg-red-500 text-white text-xs font-semibold rounded hover:bg-red-600';
+                    deleteButton.onclick = () => deleteItemizedCost(item.id);
+                    actionsCell.appendChild(deleteButton);
+                });
+            }
+            updateTotalItemizedAmount();
+        }
+        
+        function deleteItemizedCost(itemId) {
+            itemizedCostsData = itemizedCostsData.filter(item => item.id !== itemId);
+            renderItemizedCostsTable();
+        }
+
+        function updateTotalItemizedAmount() {
+            const total = itemizedCostsData.reduce((sum, item) => sum + item.amount, 0);
+            document.getElementById('totalItemizedAmount').textContent = total.toFixed(0); // Changed toFixed(0) for VND
+             if (document.getElementById('content-summary').classList.contains('hidden') === false) {
+                 updateSummaryView();
+            }
+        }
+
+        function updateCalculatedTotalCost() {
+            const area = parseFloat(document.getElementById('projectArea').value) || 0;
+            const unitRatePerSQM = parseFloat(document.getElementById('projectUnitRatePerSQM').value) || 0;
+            const calculatedTotal = area * unitRatePerSQM;
+            document.getElementById('calculatedTotalCost').textContent = formatCurrency(calculatedTotal);
+            projectInfo.calculatedTotalCost = calculatedTotal; // Store in projectInfo
+            if (document.getElementById('content-summary').classList.contains('hidden') === false) {
+                 updateSummaryView();
+            }
+        }
+
+        function updateSummaryView() {
+            const statedTotalCost = parseFloat(document.getElementById('projectTotalCost').value) || 0;
+            document.getElementById('summaryProjectTotalCost').textContent = formatCurrency(statedTotalCost);
+            
+            const totalBill = billQuantitiesData.reduce((sum, bill) => sum + bill.amount, 0);
+            document.getElementById('summaryTotalBillAmount').textContent = formatCurrency(totalBill);
+
+            const totalItemized = itemizedCostsData.reduce((sum, item) => sum + item.amount, 0);
+            document.getElementById('summaryTotalItemizedAmount').textContent = formatCurrency(totalItemized);
+
+            // Update summary for calculated total cost
+            const calculatedTotal = (parseFloat(document.getElementById('projectArea').value) || 0) * (parseFloat(document.getElementById('projectUnitRatePerSQM').value) || 0);
+            document.getElementById('summaryCalculatedTotalCost').textContent = formatCurrency(calculatedTotal);
+
+            renderCostBreakdownChart();
+        }
+        
+        function renderCostBreakdownChart() {
+            const ctx = document.getElementById('costBreakdownChart').getContext('2d');
+            const labels = billCategories.map(bill => wrapChartLabel(bill.name)); // Ensure all categories are included
+            const data = billCategories.map(bill => {
+                const billData = billQuantitiesData.find(b => b.id === bill.id);
+                return billData ? billData.amount : 0;
+            });
+
+            const chartData = {
+                labels: labels,
+                datasets: [{
+                    label: 'Cost Breakdown by Bill',
+                    data: data,
+                    backgroundColor: [
+                        '#fde68a', '#fcd34d', '#fede1d', '#f59e0b', '#d97706', 
+                        '#b45309', '#92400e', '#78350f', '#fed7aa', '#fecba6',
+                        '#fdba74', '#fb923c', '#f97316' 
+                    ], // Amber shades
+                    borderColor: billCategories.map(() => '#ffffff'), // White borders
+                    borderWidth: 2
+                }]
+            };
+
+            if (costChart) {
+                costChart.destroy();
+            }
+
+            costChart = new Chart(ctx, {
+                type: 'pie',
+                data: chartData,
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                            labels: {
+                                font: { size: 10 } // Smaller font for legend
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) {
+                                        label += ': ';
+                                    }
+                                    if (context.parsed !== null) {
+                                        label += formatCurrency(context.parsed);
+                                    }
+                                    const total = context.dataset.data.reduce((acc, val) => acc + val, 0);
+                                    const percentage = total > 0 ? ((context.parsed / total) * 100).toFixed(1) + '%' : '0%';
+                                    return `${context.label}: ${formatCurrency(context.parsed)} (${percentage})`;
+                                }
+                            }
+                        },
+                        title: {
+                            display: false, // Already have a title above chart
+                            text: 'Cost Breakdown by Bill Category'
+                        }
+                    }
+                }
+            });
+        }
+
+        async function initializeFirebase() {
+            try {
+                appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+                app = firebase.initializeApp(firebaseConfig);
+                db = firebase.getFirestore(app);
+                auth = firebase.getAuth(app);
+
+                if (typeof __initial_auth_token !== 'undefined') {
+                    await firebase.signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await firebase.signInAnonymously(auth);
+                }
+
+                firebase.onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        document.getElementById('user-id-display').textContent = `User ID: ${userId}`;
+                        loadSavedProjectsList(); // Load projects once authenticated
+                    } else {
+                        userId = null;
+                        document.getElementById('user-id-display').textContent = 'Not authenticated';
+                    }
+                });
+            } catch (error) {
+                showMessageBox(`Firebase initialization error: ${error.message}`, true);
+                console.error("Firebase initialization error:", error);
+            }
+        }
+
+        async function saveProject() {
+            if (!userId) {
+                showMessageBox("Please wait for authentication to complete before saving.", true);
+                return;
+            }
+
+            const projectName = document.getElementById('projectName').value;
+            if (!projectName) {
+                showMessageBox("Project Name is required to save the project.", true);
+                return;
+            }
+
+            showLoading(true);
+            try {
+                // Collect current project data
+                const currentProjectInfo = {};
+                const formElements = document.getElementById('project-info-form').elements;
+                for (let i = 0; i < formElements.length; i++) {
+                    const element = formElements[i];
+                    if (element.name) {
+                        currentProjectInfo[element.name] = element.value;
+                    }
+                }
+
+                const projectData = {
+                    projectName: projectName,
+                    projectInfo: currentProjectInfo,
+                    billQuantitiesData: billQuantitiesData,
+                    itemizedCostsData: itemizedCostsData,
+                    userId: userId,
+                    timestamp: firebase.serverTimestamp()
+                };
+
+                await firebase.addDoc(firebase.collection(db, 'artifacts', appId, 'public', 'data', 'projects'), projectData);
+                showMessageBox("Project saved successfully!");
+                loadSavedProjectsList(); // Refresh the list of saved projects
+            } catch (error) {
+                showMessageBox(`Error saving project: ${error.message}`, true);
+                console.error("Error saving project:", error);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        async function loadSavedProjectsList() {
+            if (!db) {
+                showMessageBox("Database not initialized. Please try again.", true);
+                return;
+            }
+
+            showLoading(true);
+            try {
+                const projectsCollectionRef = firebase.collection(db, 'artifacts', appId, 'public', 'data', 'projects');
+                const q = firebase.query(projectsCollectionRef); // No orderBy to avoid index issues
+                const querySnapshot = await firebase.getDocs(q);
+                
+                savedProjects = [];
+                querySnapshot.forEach((doc) => {
+                    const data = doc.data();
+                    savedProjects.push({ id: doc.id, name: data.projectName, data: data });
+                });
+
+                const selectElement = document.getElementById('savedProjectsSelect');
+                selectElement.innerHTML = '<option value="">-- Select a Project --</option>'; // Clear existing options
+                savedProjects.forEach(project => {
+                    const option = document.createElement('option');
+                    option.value = project.id;
+                    option.textContent = project.name;
+                    selectElement.appendChild(option);
+                });
+            } catch (error) {
+                showMessageBox(`Error loading saved projects: ${error.message}`, true);
+                console.error("Error loading saved projects:", error);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        function loadSelectedProject() {
+            const selectElement = document.getElementById('savedProjectsSelect');
+            const selectedProjectId = selectElement.value;
+
+            if (!selectedProjectId) {
+                showMessageBox("Please select a project to load.", true);
+                return;
+            }
+
+            const selectedProject = savedProjects.find(p => p.id === selectedProjectId);
+            if (selectedProject) {
+                // Populate project info form
+                const formElements = document.getElementById('project-info-form').elements;
+                for (let i = 0; i < formElements.length; i++) {
+                    const element = formElements[i];
+                    if (element.name && selectedProject.data.projectInfo[element.name] !== undefined) {
+                        element.value = selectedProject.data.projectInfo[element.name];
+                    }
+                }
+                projectInfo = selectedProject.data.projectInfo; // Update global state
+                updateCalculatedTotalCost(); // Recalculate after loading area/unit rate
+
+                // Populate bill quantities
+                billQuantitiesData = billCategories.map(bill => {
+                    const savedBill = selectedProject.data.billQuantitiesData.find(b => b.id === bill.id);
+                    return { ...bill, amount: savedBill ? savedBill.amount : 0 };
+                });
+                initializeBillQuantitiesForm(); // Re-render bill quantities form
+
+                // Populate itemized costs
+                itemizedCostsData = selectedProject.data.itemizedCostsData || [];
+                renderItemizedCostsTable(); // Re-render itemized costs table
+
+                updateSummaryView();
+                showMessageBox(`Project "${selectedProject.name}" loaded successfully!`);
+                showTab('project-overview'); // Switch to project overview after loading
+            } else {
+                showMessageBox("Selected project not found.", true);
+            }
+        }
+        
+        document.addEventListener('DOMContentLoaded', async () => {
+            showTab('project-overview');
+            initializeBillQuantitiesForm();
+            initializeItemizedCostForm();
+            renderItemizedCostsTable(); // Initial render for "no items" row
+            updateCalculatedTotalCost(); // Initial calculation for Area x Unit Rate
+            updateSummaryView(); // Initial chart render (empty)
+            document.getElementById('currentYear').textContent = new Date().getFullYear();
+
+            // Persist project info (simple example, not robust)
+            const projectInfoForm = document.getElementById('project-info-form');
+            projectInfoForm.addEventListener('input', (e) => {
+                projectInfo[e.target.name] = e.target.value;
+                if (e.target.name === 'projectTotalCost' || e.target.name === 'projectArea' || e.target.name === 'projectUnitRatePerSQM') {
+                     if (document.getElementById('content-summary').classList.contains('hidden') === false) {
+                         updateSummaryView();
+                    }
+                }
+            });
+
+            // Set the app link
+            const appLinkElement = document.getElementById('appLink');
+            appLinkElement.href = window.location.href;
+            appLinkElement.onclick = (e) => {
+                e.preventDefault(); // Prevent default link behavior
+                try {
+                    const dummyInput = document.createElement('textarea');
+                    document.body.appendChild(dummyInput);
+                    dummyInput.value = window.location.href;
+                    dummyInput.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(dummyInput);
+                    showMessageBox("Application link copied to clipboard!");
+                } catch (err) {
+                    showMessageBox("Failed to copy link. Your browser might be blocking the Clipboard API.", true);
+                    console.error('Could not copy text: ', err);
+                }
+            };
+
+
+            await initializeFirebase();
+        });
+
+    </script>
+</body>
+</html>
